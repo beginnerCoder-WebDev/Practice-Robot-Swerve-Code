@@ -2,8 +2,6 @@ package frc.robot;
 
 import static edu.wpi.first.units.Units.*;
 
-import com.ctre.phoenix6.controls.DutyCycleOut;
-import com.ctre.phoenix6.hardware.TalonFX;
 import com.ctre.phoenix6.swerve.SwerveModule.DriveRequestType;
 import com.ctre.phoenix6.swerve.SwerveRequest;
 
@@ -33,39 +31,37 @@ public class RobotContainer {
 
     private final Telemetry logger = new Telemetry(MaxSpeed);
 
-    // PS4 controller (replace to 0 if needed)
+    // PS4 controller (replace to 0)
     private final CommandPS4Controller joystick = new CommandPS4Controller(1);
 
     public final CommandSwerveDrivetrain drivetrain = TunerConstants.createDrivetrain();
 
-    // ---------------- INTAKE MOTOR ----------------
-    // Set this to your real CAN ID from Phoenix Tuner
-    private static final int INTAKE_CAN_ID = 30;
-
-    // Intake speeds (tune)
-    private static final double INTAKE_IN_PERCENT = 0.70;
-    private static final double INTAKE_OUT_PERCENT = -0.50;
-
-    private final TalonFX intakeMotor = new TalonFX(INTAKE_CAN_ID);
-    private final DutyCycleOut intakeOut = new DutyCycleOut(0.0);
-
     // ---------------- LIMELIGHT DRIVE SETTINGS ----------------
+    // Pick the pipeline index you want for aiming (set in limelight.local)
     private static final int LL_AIM_PIPELINE = 0;
 
+    // Aim Assist PID: rotates robot until tx -> 0
+    // Start values: tune on the practice field.
     private final PIDController aimPid = new PIDController(0.06, 0.0, 0.001);
+
+    // Drive-to-target PID using ta (area). Bigger ta = closer.
+    // Only used in drive-to-target mode.
     private final PIDController distancePid = new PIDController(0.6, 0.0, 0.0);
 
+    // Desired target area (ta) when you're at the right shooting/intake distance.
+    // You MUST tune this for your camera mount + target type.
     private static final double DESIRED_TA = 2.0;
 
-    private static final double MAX_AIM_RAD_PER_SEC = 2.5;
-    private static final double MAX_AUTO_FWD_MPS = 2.0;
+    // Limit outputs so it’s controllable
+    private static final double MAX_AIM_RAD_PER_SEC = 2.5;    // clamp aiming turn
+    private static final double MAX_AUTO_FWD_MPS = 2.0;       // clamp auto forward speed
 
     public RobotContainer() {
-        aimPid.setTolerance(1.0);
+        // PID config
+        aimPid.setTolerance(1.0);          // degrees
         aimPid.enableContinuousInput(-180, 180);
 
-        distancePid.setTolerance(0.15);
-
+        distancePid.setTolerance(0.15);    // ta tolerance (tune)
         configureBindings();
     }
 
@@ -74,9 +70,9 @@ public class RobotContainer {
         // ---------------- DEFAULT DRIVE (MANUAL) ----------------
         drivetrain.setDefaultCommand(
             drivetrain.applyRequest(() ->
-                drive.withVelocityX(joystick.getLeftY() * MaxSpeed)
-                    .withVelocityY(-joystick.getLeftX() * MaxSpeed)
-                    .withRotationalRate(-joystick.getRightX() * MaxAngularRate)
+                drive.withVelocityX(joystick.getLeftY() * MaxSpeed)              // forward/back
+                    .withVelocityY(-joystick.getLeftX() * MaxSpeed)             // strafe
+                    .withRotationalRate(-joystick.getRightX() * MaxAngularRate) // rotate
             )
         );
 
@@ -103,39 +99,26 @@ public class RobotContainer {
         // Reset field-centric heading on L1
         joystick.L1().onTrue(drivetrain.runOnce(drivetrain::seedFieldCentric));
 
-        // ---------------- INTAKE CONTROLS ----------------
-        // Hold TRIANGLE to intake IN
-        joystick.triangle().whileTrue(
-            Commands.run(() -> intakeMotor.setControl(intakeOut.withOutput(INTAKE_IN_PERCENT)))
-        ).onFalse(
-            Commands.runOnce(() -> intakeMotor.setControl(intakeOut.withOutput(0.0)))
-        );
-
-        // Hold SQUARE to intake OUT (reverse)
-        joystick.square().whileTrue(
-            Commands.run(() -> intakeMotor.setControl(intakeOut.withOutput(INTAKE_OUT_PERCENT)))
-        ).onFalse(
-            Commands.runOnce(() -> intakeMotor.setControl(intakeOut.withOutput(0.0)))
-        );
-
         // ---------------- LIMELIGHT: AIM ASSIST ----------------
+        // Hold R1: keep driving with left stick, but auto-rotate to center target (tx -> 0)
         joystick.R1().whileTrue(
             Commands.runOnce(() -> {
                 Limelight.setPipeline(LL_AIM_PIPELINE);
-                Limelight.setLedMode(0);
+                Limelight.setLedMode(0);   // use pipeline LED setting (or set 3 for force on)
                 aimPid.reset();
             }).andThen(
                 drivetrain.applyRequest(() -> {
                     double vx = joystick.getLeftY() * MaxSpeed;
                     double vy = -joystick.getLeftX() * MaxSpeed;
 
-                    double omega = -joystick.getRightX() * MaxAngularRate;
+                    double omega = -joystick.getRightX() * MaxAngularRate; // fallback to manual
 
                     if (Limelight.hasTarget()) {
-                        double tx = Limelight.tx();
-                        double turnCmd = aimPid.calculate(tx, 0.0);
+                        double tx = Limelight.tx(); // degrees
+                        // PID output (degrees -> turn rate command), then clamp
+                        double turnCmd = aimPid.calculate(tx, 0.0); // want tx=0
                         turnCmd = MathUtil.clamp(turnCmd, -MAX_AIM_RAD_PER_SEC, MAX_AIM_RAD_PER_SEC);
-                        omega = turnCmd;
+                        omega = turnCmd; // override rotation with vision
                     }
 
                     return drive.withVelocityX(vx)
@@ -146,6 +129,8 @@ public class RobotContainer {
         );
 
         // ---------------- LIMELIGHT: DRIVE TO TARGET (OPTIONAL) ----------------
+        // Hold R2: robot auto-drives forward/back to DESIRED_TA, and auto-aims with tx.
+        // (Strafe is still left stick so you can line up lanes while approaching.)
         joystick.R2().whileTrue(
             Commands.runOnce(() -> {
                 Limelight.setPipeline(0);
@@ -154,17 +139,19 @@ public class RobotContainer {
                 distancePid.reset();
             }).andThen(
                 drivetrain.applyRequest(() -> {
-                    double vy = -joystick.getLeftX() * MaxSpeed;
+                    double vy = -joystick.getLeftX() * MaxSpeed;  // keep manual strafe if you want
 
-                    double vx = joystick.getLeftY() * MaxSpeed;
+                    double vx = joystick.getLeftY() * MaxSpeed;   // fallback manual
                     double omega = -joystick.getRightX() * MaxAngularRate;
 
                     if (Limelight.hasTarget()) {
+                        // forward/back based on target area (ta)
                         double ta = Limelight.ta();
                         double fwdCmd = distancePid.calculate(ta, DESIRED_TA);
                         fwdCmd = MathUtil.clamp(fwdCmd, -MAX_AUTO_FWD_MPS, MAX_AUTO_FWD_MPS);
                         vx = fwdCmd;
 
+                        // auto-aim rotation
                         double tx = Limelight.tx();
                         double turnCmd = aimPid.calculate(tx, 0.0);
                         turnCmd = MathUtil.clamp(turnCmd, -MAX_AIM_RAD_PER_SEC, MAX_AIM_RAD_PER_SEC);
