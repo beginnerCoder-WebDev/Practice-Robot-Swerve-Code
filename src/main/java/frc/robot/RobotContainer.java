@@ -31,7 +31,7 @@ public class RobotContainer {
 
     private final Telemetry logger = new Telemetry(MaxSpeed);
 
-    // PS4 controller (change to 0)
+    // PS4 controller (replace to 0)
     private final CommandPS4Controller joystick = new CommandPS4Controller(1);
 
     public final CommandSwerveDrivetrain drivetrain = TunerConstants.createDrivetrain();
